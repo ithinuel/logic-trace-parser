@@ -1,5 +1,5 @@
-use crate::sample::{Sample, SampleIterator};
-use clap::{App, Arg, ArgMatches, SubCommand};
+use crate::input::Sample;
+use clap::{value_t, App, Arg, ArgMatches, SubCommand};
 use std::fmt;
 use std::str::FromStr;
 
@@ -24,19 +24,12 @@ impl fmt::Debug for SerialEvent {
         }
     }
 }
-impl SerialEvent {
-    pub fn is_error(&self) -> bool {
-        match self {
-            SerialEvent::RxError(_) | SerialEvent::TxError(_) => true,
-            _ => false,
-        }
-    }
-}
 #[derive(Debug, Clone, Copy)]
 pub enum SerialError {
     /// Generated when a framing error is detected
     Framing,
     /// Generated when a parity error is detected
+    #[allow(dead_code)]
     Parity,
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,28 +66,25 @@ enum MonitorState {
     Stop(u8),
 }
 struct Monitor {
-    prefix: &'static str,
     state: MonitorState,
     ts: f64,
     data: bool,
     last_fc: bool,
     bit_duration: f64,
     parity: Parity,
-    on_data: &'static Fn(u8) -> SerialEvent,
-    on_err: &'static Fn(SerialError) -> SerialEvent,
-    on_fc: &'static Fn(bool) -> SerialEvent,
+    on_data: &'static dyn Fn(u8) -> SerialEvent,
+    on_err: &'static dyn Fn(SerialError) -> SerialEvent,
+    on_fc: &'static dyn Fn(bool) -> SerialEvent,
 }
 impl Monitor {
     fn new(
-        prefix: &'static str,
         baud: f64,
         parity: Parity,
-        on_data: &'static Fn(u8) -> SerialEvent,
-        on_err: &'static Fn(SerialError) -> SerialEvent,
-        on_fc: &'static Fn(bool) -> SerialEvent,
+        on_data: &'static dyn Fn(u8) -> SerialEvent,
+        on_err: &'static dyn Fn(SerialError) -> SerialEvent,
+        on_fc: &'static dyn Fn(bool) -> SerialEvent,
     ) -> Self {
         Monitor {
-            prefix,
             state: MonitorState::Idle,
             ts: -0.1,
             data: true,
@@ -176,61 +166,51 @@ impl Monitor {
     }
 }
 
-pub struct Serial<T>
-where
-    T: Iterator<Item = Sample>,
-{
+pub struct Serial<T> {
     it: T,
     pending_event: Vec<(f64, SerialEvent)>,
-    inspect: bool,
 
     // Monitor Rx + RTS
-    rx_mask: u8,
-    rts_mask: u8,
+    rx_mask: u64,
+    rts_mask: u64,
     rx: Monitor,
     // Monitor Tx + CTS
-    tx_mask: u8,
-    cts_mask: u8,
+    tx_mask: u64,
+    cts_mask: u64,
     tx: Monitor,
 }
 
 impl<T> Iterator for Serial<T>
 where
-    T: Iterator<Item = Sample>,
+    T: Iterator<Item = (f64, anyhow::Result<Sample>)>,
 {
-    type Item = (f64, SerialEvent);
+    type Item = (f64, anyhow::Result<SerialEvent>);
     fn next(&mut self) -> Option<Self::Item> {
-        let ret = if self.pending_event.len() > 0 {
-            self.pending_event.pop()
-        } else {
-            while let Some(smp) = self.it.next() {
-                let ts = smp.timestamp();
-                let smp = smp.sample();
-
-                self.pending_event.extend(
-                    self.rx
-                        .update(
-                            ts,
-                            (smp & self.rx_mask) == self.rx_mask,
-                            (smp & self.rts_mask) == self.rts_mask,
-                        )
-                        .iter()
-                        .flatten(),
-                );
-                self.pending_event.extend(
-                    self.tx
-                        .update(
-                            ts,
-                            (smp & self.tx_mask) == self.tx_mask,
-                            (smp & self.cts_mask) == self.cts_mask,
-                        )
-                        .iter()
-                        .flatten(),
-                );
-                if self.pending_event.len() > 0 {
-                    break;
-                }
-            }
+        while self.pending_event.len() == 0 {
+            let (ts, smp) = match self.it.next()? {
+                (ts, Ok(Sample(smp))) => (ts, smp),
+                (ts, Err(e)) => return Some((ts, Err(e))),
+            };
+            self.pending_event.extend(
+                self.rx
+                    .update(
+                        ts,
+                        (smp & self.rx_mask) == self.rx_mask,
+                        (smp & self.rts_mask) == self.rts_mask,
+                    )
+                    .iter()
+                    .flatten(),
+            );
+            self.pending_event.extend(
+                self.tx
+                    .update(
+                        ts,
+                        (smp & self.tx_mask) == self.tx_mask,
+                        (smp & self.cts_mask) == self.cts_mask,
+                    )
+                    .iter()
+                    .flatten(),
+            );
             if self.pending_event.len() == 0 {
                 if let Some(tx) = self.tx.finalize() {
                     self.pending_event.push(tx);
@@ -241,24 +221,13 @@ where
             }
             self.pending_event
                 .sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-            self.pending_event.pop()
-        };
-        if self.inspect {
-            if let Some((ref ts, ref ev)) = ret {
-                println!("{:.6} {:?}", ts, ev);
-            }
         }
-        ret
+        self.pending_event.pop().map(|(ts, ev)| (ts, Ok(ev)))
     }
 }
 
-impl<T> Serial<SampleIterator<T>>
-where
-    T: 'static + std::io::Read,
-{
-    pub fn new<'a>(input: T, matches: &ArgMatches<'a>, depth: u64) -> Serial<SampleIterator<T>> {
-        let inspect = matches.occurrences_of("v") >= depth;
-
+impl<T> Serial<T> {
+    pub fn new<'a>(input: T, matches: &ArgMatches<'a>) -> Serial<T> {
         let tx_mask = 1 << value_t!(matches, "tx", u8).unwrap_or_else(|e| e.exit());
         let rx_mask = 1 << value_t!(matches, "rx", u8).unwrap_or_else(|e| e.exit());
         let rts_mask = if let Some(v) = matches.value_of("rts") {
@@ -304,14 +273,12 @@ where
         };
         let parity = value_t!(matches, "parity", Parity).unwrap_or_else(|e| e.exit());
 
-        Serial {
-            it: SampleIterator::new(input, matches, depth + 1),
+        Self {
+            it: input,
             pending_event: Vec::with_capacity(4),
-            inspect,
             rx_mask,
             rts_mask,
             rx: Monitor::new(
-                "rx",
                 baud,
                 parity,
                 &SerialEvent::Rx,
@@ -321,7 +288,6 @@ where
             tx_mask,
             cts_mask,
             tx: Monitor::new(
-                "tx",
                 baud,
                 parity,
                 &SerialEvent::Tx,
@@ -330,78 +296,13 @@ where
             ),
         }
     }
-    /*
-    pub fn new_with_options<'a>(
-        input: T,
-        matches: &ArgMatches<'a>,
-        depth: u64,
-        rx: Option<u8>,
-        rts: Option<u8>,
-        rx: Option<u8>,
-        cts: Option<u8>,
-        baud: Option<f64>,
-        parity: Option<Parity>,
-    ) -> Serial<SampleIterator<T>> {
-        let inspect = matches.occurrences_of("v") >= depth;
-
-        let tx_mask = 1 << tx.unwrap_or_else(|_| value_t!(matches, "tx", u8).unwrap_or_else(|e| e.exit()));
-        let rx_mask = 1 << rx.unwrap_or_else(|_| value_t!(matches, "rx", u8).unwrap_or_else(|e| e.exit()));
-        let rts_mask = if let Some(v) = matches.value_of("rts") {
-            match v.parse::<u8>() {
-                Ok(val) => 1 << val,
-                Err(_) => ::clap::Error::value_validation_auto(
-                    "the argument 'rts' isn't a valid value".to_string(),
-                )
-                .exit(),
-            }
-        } else {
-            0
-        };
-        let cts_mask = if let Some(v) = matches.value_of("cts") {
-            match v.parse::<u8>() {
-                Ok(val) => 1 << val,
-                Err(_) => ::clap::Error::value_validation_auto(
-                    "the argument 'cts' isn't a valid value".to_string(),
-                )
-                .exit(),
-            }
-        } else {
-            0
-        };
-        let baud = if let Some(baud) = matches.value_of("baud") {
-            if baud == "auto" {
-                ::clap::Error::with_description(
-                    "Auto baudrate detection not yet implemented",
-                    ::clap::ErrorKind::ValueValidation,
-                )
-                .exit();
-            } else {
-                match baud.parse::<u32>() {
-                    Ok(val) => val as f64,
-                    Err(_) => ::clap::Error::value_validation_auto(
-                        "the argument 'baud' isn't a valid value".to_string(),
-                    )
-                    .exit(),
-                }
-            }
-        } else {
-            unreachable!();
-        };
-        let parity = value_t!(matches, "parity", Parity).unwrap_or_else(|e| e.exit());
-
-        Serial {
-            it: SampleIterator::new(input, matches, depth + 1),
-            pending_event: VecDeque::new(),
-            inspect,
-            rx_mask,
-            rts_mask,
-            rx: Monitor::new("rx", baud, parity, &SerialEvent::Rx, &SerialEvent::Rts),
-            tx_mask,
-            cts_mask,
-            tx: Monitor::new("tx", baud, parity, &SerialEvent::Tx, &SerialEvent::Cts),
-        }
-    }*/
 }
+pub trait SerialIteratorExt: Sized {
+    fn into_serial(self, matches: &ArgMatches) -> Serial<Self> {
+        Serial::new(self, matches)
+    }
+}
+impl<T> SerialIteratorExt for T where T: Iterator<Item = (f64, anyhow::Result<Sample>)> {}
 
 pub fn args() -> [Arg<'static, 'static>; 7] {
     [

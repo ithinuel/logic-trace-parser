@@ -1,4 +1,3 @@
-use crate::sample::SampleIterator;
 use crate::spi::{self, SpiEvent};
 use clap::{App, ArgMatches, SubCommand};
 use std::fmt;
@@ -136,23 +135,16 @@ enum PartialCommand {
     ReadDeviceId(f64, DeviceId),
     None,
 }
-pub struct Spif<T>
-where
-    T: Iterator<Item = (f64, SpiEvent)>,
-{
+pub struct Spif<T> {
     it: T,
-    inspect: bool,
 
     cs: bool,
     idx: u32,
     partial: PartialCommand,
 }
 
-impl<T> Spif<T>
-where
-    T: Iterator<Item = (f64, SpiEvent)>,
-{
-    fn new_cmd(&mut self, ts: f64, mosi: u8, miso: u8) -> Result<Option<Command>, String> {
+impl<T> Spif<T> {
+    fn new_cmd(&mut self, ts: f64, mosi: u8, miso: u8) -> anyhow::Result<Option<Command>> {
         self.idx = 0;
         match mosi {
             0x02 => {
@@ -197,15 +189,20 @@ where
                 Ok(None)
             }
 
-            _ => Err(format!("{:.6} Unsupported cmd {:x}-{:x}", ts, mosi, miso)),
+            _ => Err(anyhow::anyhow!(
+                "{:.6} Unsupported cmd {:x}-{:x}",
+                ts,
+                mosi,
+                miso
+            )),
         }
     }
 
-    fn update(&mut self, ts: f64, ev: SpiEvent) -> Result<Option<(f64, Command)>, String> {
+    fn update(&mut self, ts: f64, ev: SpiEvent) -> Option<(f64, anyhow::Result<Command>)> {
         match ev {
             SpiEvent::ChipSelect(false) => {
                 self.cs = false;
-                Ok(None)
+                None
             }
             SpiEvent::ChipSelect(true) => {
                 self.cs = true;
@@ -213,19 +210,19 @@ where
                 let mut partial = PartialCommand::None;
                 std::mem::swap(&mut partial, &mut self.partial);
                 match partial {
-                    PartialCommand::Read(sts, r) => Ok(Some((sts, Command::Read(r)))),
+                    PartialCommand::Read(sts, r) => Some((sts, Ok(Command::Read(r)))),
                     PartialCommand::PageProgram(sts, pp) => {
-                        Ok(Some((sts, Command::PageProgram(pp))))
+                        Some((sts, Ok(Command::PageProgram(pp))))
                     }
-                    PartialCommand::ReadSFDP(sts, sfdp) => Ok(Some((sts, Command::ReadSFDP(sfdp)))),
-                    _ => Ok(None),
+                    PartialCommand::ReadSFDP(sts, sfdp) => Some((sts, Ok(Command::ReadSFDP(sfdp)))),
+                    _ => None,
                 }
             }
             SpiEvent::Data { mosi, miso } if !self.cs => match self.partial {
                 PartialCommand::None => match self.new_cmd(ts, mosi, miso) {
-                    Ok(Some(cmd)) => Ok(Some((ts, cmd))),
-                    Ok(None) => Ok(None),
-                    Err(msg) => Err(msg),
+                    Ok(Some(cmd)) => Some((ts, Ok(cmd))),
+                    Ok(None) => None,
+                    Err(msg) => Some((ts, Err(msg))),
                 },
                 PartialCommand::Read(_, ref mut r) => {
                     if self.idx < 3 {
@@ -234,47 +231,45 @@ where
                     } else {
                         r.data.push(miso);
                     }
-                    Ok(None)
+                    None
                 }
                 PartialCommand::ReadStatusRegister(sts) => {
                     self.partial = PartialCommand::None;
-                    Ok(Some((
-                        sts,
-                        Command::ReadStatusRegister(StatusRegister(miso)),
-                    )))
+                    Some((sts, Ok(Command::ReadStatusRegister(StatusRegister(miso)))))
                 }
-                PartialCommand::BlockErase(ref sts, ref mut addr) => {
-                    let mut res = None;
+                PartialCommand::BlockErase(sts, ref mut addr) => {
                     if self.idx < 2 {
                         *addr = (*addr << 8) | (mosi as u32);
                         self.idx += 1;
+                        None
                     } else {
-                        res = Some((*sts, Command::BlockErase((*addr << 8) | (mosi as u32))));
+                        let addr = *addr;
                         self.partial = PartialCommand::None;
+                        Some((sts, Ok(Command::BlockErase((addr << 8) | (mosi as u32)))))
                     }
-                    Ok(res)
                 }
-                PartialCommand::BlockErase32(ref sts, ref mut addr) => {
-                    let mut res = None;
+                PartialCommand::BlockErase32(sts, ref mut addr) => {
                     if self.idx < 2 {
                         *addr = (*addr << 8) | (mosi as u32);
                         self.idx += 1;
+                        None
                     } else {
-                        res = Some((*sts, Command::BlockErase32((*addr << 8) | (mosi as u32))));
+                        let addr = *addr;
                         self.partial = PartialCommand::None;
+                        Some((sts, Ok(Command::BlockErase32((addr << 8) | (mosi as u32)))))
                     }
-                    Ok(res)
                 }
-                PartialCommand::SectorErase(ref sts, ref mut addr) => {
-                    let mut res = None;
+
+                PartialCommand::SectorErase(sts, ref mut addr) => {
                     if self.idx < 2 {
                         *addr = (*addr << 8) | (mosi as u32);
                         self.idx += 1;
+                        None
                     } else {
-                        res = Some((*sts, Command::SectorErase((*addr << 8) | (mosi as u32))));
+                        let addr = *addr;
                         self.partial = PartialCommand::None;
+                        Some((sts, Ok(Command::SectorErase((addr << 8) | (mosi as u32)))))
                     }
-                    Ok(res)
                 }
                 PartialCommand::PageProgram(_, ref mut pp) => {
                     if self.idx < 3 {
@@ -283,7 +278,7 @@ where
                     } else {
                         pp.data.push(mosi);
                     }
-                    Ok(None)
+                    None
                 }
                 PartialCommand::ReadSFDP(_, ref mut sfdp) => {
                     if self.idx < 3 {
@@ -292,79 +287,69 @@ where
                     } else {
                         sfdp.data.push(miso);
                     }
-                    Ok(None)
+                    None
                 }
-                PartialCommand::ReadDeviceId(ref sts, ref mut rdid) => {
-                    let mut res = None;
-                    match self.idx {
-                        0 => {
-                            rdid.manufacturer = miso;
-                            self.idx += 1
-                        }
-                        1 => {
-                            rdid.device_id = (miso as u16) << 8;
-                            self.idx += 1
-                        }
-                        2 => {
-                            rdid.device_id |= miso as u16;
-                            res = Some((*sts, Command::ReadDeviceId(*rdid)));
-                            self.partial = PartialCommand::None;
-                        }
-                        _ => unreachable!(),
+                PartialCommand::ReadDeviceId(sts, ref mut rdid) => match self.idx {
+                    0 => {
+                        rdid.manufacturer = miso;
+                        self.idx += 1;
+                        None
                     }
-                    Ok(res)
-                }
+                    1 => {
+                        rdid.device_id = (miso as u16) << 8;
+                        self.idx += 1;
+                        None
+                    }
+                    2 => {
+                        rdid.device_id |= miso as u16;
+                        let rdid = *rdid;
+                        self.partial = PartialCommand::None;
+                        Some((sts, Ok(Command::ReadDeviceId(rdid))))
+                    }
+                    _ => unreachable!(),
+                },
             },
-            _ => Err(format!("Ignoring event: {:?} at {:.6}", ev, ts)),
+            _ => Some((ts, Err(anyhow::anyhow!("Ignoring event: {:?}", ev)))),
         }
     }
 }
 
 impl<T> Iterator for Spif<T>
 where
-    T: Iterator<Item = (f64, SpiEvent)>,
+    T: Iterator<Item = (f64, anyhow::Result<SpiEvent>)>,
 {
-    type Item = Result<(f64, Command), String>;
+    type Item = (f64, anyhow::Result<Command>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((ts, ev)) = self.it.next() {
-            match self.update(ts, ev) {
-                Ok(None) => {}
-                Ok(Some((ts, cmd))) => {
-                    if self.inspect {
-                        println!("{:.6} {:?}", ts, cmd);
-                    }
-                    return Some(Ok((ts, cmd)));
-                }
-                Err(msg) => {
-                    return Some(Err(msg));
-                }
+        Some(loop {
+            let (ts, ev) = match self.it.next()? {
+                (ts, Ok(event)) => (ts, event),
+                (ts, Err(e)) => return Some((ts, Err(e))),
+            };
+            if let Some(res) = self.update(ts, ev) {
+                break res;
             }
-        }
-        None
+        })
     }
 }
 
-impl<T> Spif<spi::Spi<SampleIterator<T>>>
-where
-    T: 'static + std::io::Read,
-{
-    pub fn new<'a>(
-        input: T,
-        matches: &ArgMatches<'a>,
-        depth: u64,
-    ) -> Spif<spi::Spi<SampleIterator<T>>> {
-        let inspect = matches.occurrences_of("v") >= depth;
-        let it = spi::Spi::new(input, &matches, depth + 1);
+impl<T> Spif<T> {
+    pub fn new<'a>(input: T, _matches: &ArgMatches<'a>) -> Spif<T> {
         Self {
-            it,
-            inspect,
+            it: input,
             cs: false,
             idx: 0,
             partial: PartialCommand::None,
         }
     }
 }
+pub trait SpifIteratorExt: Sized {
+    fn into_spif(self, matches: &ArgMatches) -> Spif<Self> {
+        Spif::new(self, matches)
+    }
+}
+impl<T> SpifIteratorExt for T where T: Iterator<Item = (f64, anyhow::Result<SpiEvent>)> {}
+
 pub fn subcommand() -> App<'static, 'static> {
     SubCommand::with_name("spif").args(&spi::args())
 }

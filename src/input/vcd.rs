@@ -1,6 +1,8 @@
-use crate::sample::Sample;
+use super::Sample;
+use anyhow::anyhow;
 use std::collections::BTreeMap;
 use std::io::Read;
+
 use vcd::{Command, IdCode, Parser, TimescaleUnit, Value, VarType};
 
 pub struct VcdParser<T>
@@ -12,7 +14,7 @@ where
     first_ts: f64,
     current_ts: f64,
     vars: BTreeMap<IdCode, usize>,
-    state: u8,
+    state: u64,
     stopped: bool,
 }
 
@@ -37,13 +39,14 @@ impl<T> Iterator for VcdParser<T>
 where
     T: Read,
 {
-    type Item = Result<Sample, String>;
-    fn next(&mut self) -> Option<Result<Sample, String>> {
+    type Item = (f64, anyhow::Result<Sample>);
+    fn next(&mut self) -> Option<Self::Item> {
         if self.stopped {
             return None;
         }
-        while let Some(res) = self.input.next() {
-            match res {
+
+        let out = loop {
+            match self.input.next()? {
                 Ok(cmd) => match cmd {
                     Command::Timescale(n, unit) => {
                         self.factor = (n as f64)
@@ -61,8 +64,12 @@ where
                         if self.first_ts == -0.1 {
                             self.first_ts = new_ts;
                         }
+
                         let new_ts = new_ts - self.first_ts - 0.1;
-                        assert!(self.current_ts <= new_ts, "Timestamp must be monotonic");
+                        if self.current_ts > new_ts {
+                            self.stopped = true;
+                            break (self.current_ts, Err(anyhow!("Timestamp must be monotonic")));
+                        }
                         self.current_ts = new_ts;
                     }
                     Command::ChangeScalar(id, v) => {
@@ -71,13 +78,16 @@ where
                             Value::V1 => 1,
                             _ => {
                                 self.stopped = true;
-                                return Some(Err(format!("Unsupported value : {:?}", v)));
+                                break (
+                                    self.current_ts,
+                                    Err(anyhow!("Unsupported value : {:?}", v)),
+                                );
                             }
                         };
                         let shift = self.vars[&id];
                         self.state &= !(1 << shift);
                         self.state |= v << shift;
-                        return Some(Ok(Sample::new(self.state, self.current_ts)));
+                        break (self.current_ts, Ok(Sample(self.state)));
                     }
                     Command::VarDef(ty, _sz, id, name) => {
                         if ty == VarType::Wire {
@@ -86,18 +96,19 @@ where
                                 name.split('_').nth(1).unwrap().parse::<usize>().unwrap(),
                             );
                         } else {
-                            return Some(Err(format!("Unsupported VarType: {:?}", ty)));
+                            break (
+                                self.current_ts,
+                                Err(anyhow!("Unsupported VarType: {:?}", ty)),
+                            );
                         }
                     }
                     _v => {
                         //eprintln!("ignoring: {:?}", v);
                     }
                 },
-                Err(err) => {
-                    return Some(Err(format!("{:?}", err)));
-                }
+                Err(err) => break (self.current_ts, Err(anyhow!("{:?}", err))),
             }
-        }
-        None
+        };
+        Some(out)
     }
 }

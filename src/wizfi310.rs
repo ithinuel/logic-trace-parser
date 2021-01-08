@@ -1,11 +1,9 @@
-use crate::sample::SampleIterator;
-use crate::serial::{self, SerialError, SerialEvent};
-use clap::{App, Arg, ArgMatches, SubCommand};
+use crate::serial::{self, SerialEvent};
+use clap::{App, ArgMatches, SubCommand};
 use std::net::Ipv4Addr;
 
 #[derive(Debug)]
 pub enum WizFi310Event {
-    Greeting(String),
     Command(String),
     Sent(String),
     Recv(RecvHeader, String),
@@ -18,12 +16,8 @@ pub struct RecvHeader {
     port: u16,
 }
 
-pub struct Wizfi310<T>
-where
-    T: Iterator<Item = (f64, SerialEvent)>,
-{
+pub struct Wizfi310<T> {
     it: T,
-    inspect: bool,
     data_to_send: usize,
     data_to_receive: usize,
     recv_header: Option<RecvHeader>,
@@ -34,13 +28,16 @@ where
 
 impl<T> Iterator for Wizfi310<T>
 where
-    T: Iterator<Item = (f64, SerialEvent)>,
+    T: Iterator<Item = (f64, anyhow::Result<SerialEvent>)>,
 {
-    type Item = (f64, WizFi310Event);
+    type Item = (f64, anyhow::Result<WizFi310Event>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut res = None;
-        while let Some((ts, ev)) = self.it.next() {
+        let out = loop {
+            let (ts, ev) = match self.it.next()? {
+                (ts, Ok(ev)) => (ts, ev),
+                (ts, Err(e)) => return Some((ts, Err(e))),
+            };
             match ev {
                 SerialEvent::Tx(c) => {
                     self.tx.push(c as char);
@@ -51,12 +48,12 @@ where
 
                             let mut v = String::new();
                             std::mem::swap(&mut v, &mut self.tx);
-                            res = Some((ts, WizFi310Event::Sent(v)));
+                            break (ts, Ok(WizFi310Event::Sent(v)));
                         }
                     } else if (c as char) == '\r' {
                         let mut v = String::new();
                         std::mem::swap(&mut v, &mut self.tx);
-                        res = Some((ts, WizFi310Event::Command(v)));
+                        break (ts, Ok(WizFi310Event::Command(v)));
                     }
                 }
                 SerialEvent::Rx(c) => {
@@ -68,10 +65,10 @@ where
 
                             let mut v = String::new();
                             std::mem::swap(&mut v, &mut self.rx);
-                            res = Some((
+                            break (
                                 ts,
-                                WizFi310Event::Recv(self.recv_header.take().unwrap(), v),
-                            ));
+                                Ok(WizFi310Event::Recv(self.recv_header.take().unwrap(), v)),
+                            );
                         }
                     } else if (c as char) == '\n' {
                         if self.rx.starts_with("[") && self.rx.ends_with("]\r\n") {
@@ -84,7 +81,7 @@ where
                         }
                         let mut v = String::new();
                         std::mem::swap(&mut v, &mut self.rx);
-                        res = Some((ts, WizFi310Event::Resp(v)));
+                        break (ts, Ok(WizFi310Event::Resp(v)));
                     } else if (c as char) == '}' {
                         let header = self
                             .rx
@@ -110,39 +107,15 @@ where
             // if rx in data mode:
             //      has buf len reached expected length ?
             //
-
-            if self.inspect {
-                if let Some((ref ts, ref s)) = res {
-                    println!("{:.6} {:?}", ts, s);
-                };
-            }
-            if let Some((_, ref res)) = res {
-                match res {
-                    WizFi310Event::Command(s) => {}
-                    WizFi310Event::Resp(s) => {}
-                    _ => {}
-                }
-                break;
-            }
-        }
-        res
+        };
+        Some(out)
     }
 }
 
-impl<T> Wizfi310<serial::Serial<SampleIterator<T>>>
-where
-    T: 'static + std::io::Read,
-{
-    pub fn new<'a>(
-        input: T,
-        matches: &ArgMatches<'a>,
-        depth: u64,
-    ) -> Wizfi310<serial::Serial<SampleIterator<T>>> {
-        let inspect = matches.occurrences_of("v") >= depth;
-        let it = serial::Serial::new(input, &matches, depth + 1);
+impl<T> Wizfi310<T> {
+    pub fn new<'a>(input: T, _matches: &ArgMatches<'a>) -> Wizfi310<T> {
         Self {
-            it,
-            inspect,
+            it: input,
             data_to_send: 0,
             data_to_receive: 0,
             recv_header: None,
@@ -151,6 +124,12 @@ where
         }
     }
 }
+pub trait Wizfi310IteratorExt: Sized {
+    fn into_wizfi310(self, matches: &ArgMatches) -> Wizfi310<Self> {
+        Wizfi310::new(self, matches)
+    }
+}
+impl<T> Wizfi310IteratorExt for T where T: Iterator<Item = (f64, anyhow::Result<SerialEvent>)> {}
 
 pub fn subcommand() -> App<'static, 'static> {
     SubCommand::with_name("wizfi310").args(&serial::args())

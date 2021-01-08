@@ -11,6 +11,9 @@ is-it-maintained-open-issues = { repository = "https://github.com/ithinuel/logic
 maintenance = { status = "experimental" }
 
 [dependencies]
-nom = "4.2.0"
-clap = "2.32"
+nom = "5"
+clap = "2"
 vcd = "0.4.0"
+anyhow = "1"
+indicatif= { version = "*" }
+itertools = "*"

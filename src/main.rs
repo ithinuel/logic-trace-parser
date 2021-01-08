@@ -1,28 +1,43 @@
-#[macro_use]
-extern crate nom;
+use anyhow::Context;
+use clap::{crate_authors, crate_description, crate_name, crate_version, App, AppSettings, Arg};
 
-#[macro_use]
-extern crate clap;
-
-use clap::{App, AppSettings, Arg};
-
-mod logicdata_parser;
-mod sample;
+mod input;
 mod serial;
 mod spi;
 mod spif;
-mod vcd_parser;
 mod wizfi310;
 
-use std::io::{stdin, Read};
+use input::sample_iterator;
+use serial::SerialIteratorExt as _;
+use spi::SpiIteratorExt as _;
+use spif::SpifIteratorExt as _;
+use wizfi310::Wizfi310IteratorExt as _;
 
-fn main() {
+fn inspect_with_depth<T: core::fmt::Debug>(
+    matches: &clap::ArgMatches,
+    source: &'static str,
+    depth: u64,
+) -> impl Fn(&(f64, T)) {
+    let verbosity = matches.occurrences_of("v");
+    move |(ts, v)| {
+        if verbosity >= depth {
+            println!("{:.9}:{}: {:x?}", ts, source, v);
+        }
+    }
+}
+fn print<T: core::fmt::Debug>((ts, v): (f64, T)) {
+    println!("{:.9}: {:x?}", ts, v)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new(crate_name!())
         .setting(AppSettings::UnifiedHelpMessage)
         .version(crate_version!())
         .author(crate_authors!())
         .about(crate_description!())
+        .setting(AppSettings::SubcommandRequiredElseHelp)
         .arg(Arg::from_usage("--vcd 'Input is a vcd file'").global(true))
+        .arg(Arg::from_usage("--logic2 'Input is a Saleae Logic 2 capture file'").global(true))
         .subcommand(spi::subcommand())
         .subcommand(spif::subcommand())
         .subcommand(serial::subcommand())
@@ -37,25 +52,37 @@ fn main() {
                 .help("Sets the level of verbosity")
                 .global(true),
             Arg::with_name("file")
-                .help("Input file. If not provided, stdin will be used.")
-                .global(true),
+                .help("Input file. (may be a folder in case of Saleae Logic 2 exports.)")
+                .required(true),
         ])
         .get_matches();
 
-    let input: Box<Read> = if let Some(path) = matches.value_of("file") {
-        Box::new(std::fs::File::open(path).unwrap_or_else(|e| {
-            clap::Error::with_description(&format!("{:?}", e), clap::ErrorKind::ValueValidation)
-                .exit()
-        }))
-    } else {
-        Box::new(stdin())
-    };
+    let path = matches
+        .value_of("file")
+        .with_context(|| "clap guaranties this is available.")?;
 
     match matches.subcommand() {
-        ("spif", Some(matches)) => spif::Spif::new(input, &matches, 0).for_each(|_| {}),
-        ("spi", Some(matches)) => spi::Spi::new(input, &matches, 0).for_each(|_| {}),
-        ("serial", Some(matches)) => serial::Serial::new(input, &matches, 0).for_each(|_| {}),
-        ("wizfi310", Some(matches)) => wizfi310::Wizfi310::new(input, &matches, 0).for_each(|_| {}),
-        _ => sample::SampleIterator::new(input, &matches, 0).for_each(|_| {}),
-    }
+        ("spif", Some(matches)) => sample_iterator(path, matches)?
+            .inspect(inspect_with_depth(matches, "sample", 2))
+            .into_spi(matches)
+            .inspect(inspect_with_depth(matches, "spi", 1))
+            .into_spif(matches)
+            .for_each(|_| todo!()),
+        ("spi", Some(matches)) => sample_iterator(path, matches)?
+            .inspect(inspect_with_depth(matches, "sample", 1))
+            .into_spi(matches)
+            .for_each(print),
+        ("serial", Some(matches)) => sample_iterator(path, matches)?
+            .inspect(inspect_with_depth(matches, "sample", 1))
+            .into_serial(matches)
+            .for_each(print),
+        ("wizfi310", Some(matches)) => sample_iterator(path, matches)?
+            .inspect(inspect_with_depth(matches, "sample", 2))
+            .into_serial(matches)
+            .inspect(inspect_with_depth(matches, "serial", 1))
+            .into_wizfi310(matches)
+            .for_each(print),
+        _ => unreachable!(),
+    };
+    Ok(())
 }
