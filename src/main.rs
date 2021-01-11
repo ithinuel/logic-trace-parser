@@ -70,6 +70,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .value_of("file")
         .with_context(|| "clap guaranties this is available.")?;
 
+    use console::TermFamily;
+    if let TermFamily::UnixTerm | TermFamily::WindowsConsole =
+        console::Term::stderr().features().family()
+    {
+        eprint!("\x1B]0;Parsing: {:?}\x07", path);
+    }
+
     match matches.subcommand() {
         ("spif", Some(matches)) => sample_iterator(path, matches)?
             .inspect(inspect_with_depth(matches, "sample", 2))

@@ -15,5 +15,6 @@ nom = "5"
 clap = "2"
 vcd = "0.4.0"
 anyhow = "1"
-indicatif= { version = "*" }
+indicatif = "*"
+console = "*"
 itertools = "*"
