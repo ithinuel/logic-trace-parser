@@ -104,7 +104,7 @@ where
             if sig == Signal::SE1 {
                 self.ev_queue
                     .push_back((ts, Err(anyhow::anyhow!("Unexpected bus state"))));
-            } else if sig == Signal::SE0 && len > 0.020 {
+            } else if sig == Signal::SE0 && len > 0.010 {
                 self.ev_queue.push_back((ts, Ok(Byte::Reset)));
                 self.state = State::Reset;
                 self.counter = 0;
