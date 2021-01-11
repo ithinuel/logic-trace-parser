@@ -79,5 +79,5 @@ pub fn args() -> [Arg<'static, 'static>; 3] {
 }
 
 pub fn subcommand() -> App<'static, 'static> {
-    SubCommand::with_name("usb::signals").args(&args())
+    SubCommand::with_name("usb::signal").args(&args())
 }
