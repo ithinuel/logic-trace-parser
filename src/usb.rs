@@ -5,6 +5,7 @@
 mod types;
 
 pub mod byte;
+pub mod device;
 pub mod packet;
 pub mod protocol;
 pub mod signal;

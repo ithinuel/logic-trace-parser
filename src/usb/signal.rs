@@ -72,8 +72,8 @@ impl<T> SignalIteratorExt for T where T: Iterator<Item = (f64, anyhow::Result<Sa
 
 pub fn args() -> [Arg<'static, 'static>; 3] {
     [
-        Arg::from_usage("--dp [dp] 'Channel used for the d+ pin'").required(true),
-        Arg::from_usage("--dm [dm] 'Channel used for the d- pin'").required(true),
+        Arg::from_usage("--dp [dp] 'Channel used for the d+ pin'").default_value("0"),
+        Arg::from_usage("--dm [dm] 'Channel used for the d- pin'").default_value("1"),
         Arg::from_usage("--fs 'Indicates that the device is full-speed USB'"),
     ]
 }

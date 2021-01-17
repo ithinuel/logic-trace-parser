@@ -13,6 +13,7 @@ use serial::SerialIteratorExt as _;
 use spi::SpiIteratorExt as _;
 use spif::SpifIteratorExt as _;
 use usb::byte::ByteIteratorExt as _;
+use usb::device::DeviceEventIteratorExt as _;
 use usb::packet::PacketIteratorExt as _;
 use usb::protocol::ProtocolIteratorExt as _;
 use usb::signal::SignalIteratorExt as _;
@@ -51,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .subcommand(usb::byte::subcommand())
         .subcommand(usb::packet::subcommand())
         .subcommand(usb::protocol::subcommand())
+        .subcommand(usb::device::subcommand())
         .args(&[
             Arg::from_usage("-f, --freq [freq] 'Sample frequency (only used on binary input)'")
                 .default_value("1.")
@@ -125,6 +127,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into_packet(matches)
             .inspect(inspect_with_depth(matches, "packet", 1))
             .into_protocol(matches)
+            .for_each(print),
+        ("usb::device", Some(matches)) => sample_iterator(path, matches)?
+            .inspect(inspect_with_depth(matches, "sample", 5))
+            .into_signal(matches)
+            .inspect(inspect_with_depth(matches, "signal", 4))
+            .into_byte(matches)
+            .inspect(inspect_with_depth(matches, "byte", 3))
+            .into_packet(matches)
+            .inspect(inspect_with_depth(matches, "packet", 2))
+            .into_protocol(matches)
+            .inspect(inspect_with_depth(matches, "protocol", 1))
+            .into_device(matches)
             .for_each(print),
         _ => unreachable!(),
     };

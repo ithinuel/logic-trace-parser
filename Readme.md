@@ -29,3 +29,14 @@ SUBCOMMANDS:
 ## How to use :
 
 `ltp trace_sample_on_change.bin | rg -v '(StatusRegister|WriteEnable)' | less`
+
+## TODO:
+
+Things I'd like to implement at some point in the future:
+
+- [ ] Source-sink pipelining
+- [ ] usb::device::msd
+- [ ] usb::device::cdc
+- [ ] automatic usb speed detection
+- [ ] SCSI
+- [ ] ppp
