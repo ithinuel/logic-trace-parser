@@ -601,7 +601,7 @@ impl StringDescriptor {
 pub struct MaxPower(pub u8);
 impl std::fmt::Debug for MaxPower {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "\"{}mA\"", self.0 * 2)
+        write!(f, "\"{}mA\"", u16::from(self.0) * 2)
     }
 }
 
