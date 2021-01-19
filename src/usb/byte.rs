@@ -1,5 +1,6 @@
 use super::signal::Signal;
 use clap::{App, Arg, ArgMatches, SubCommand};
+use itertools::{peek_nth, PeekNth};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy)]
@@ -18,9 +19,8 @@ pub enum State {
     Suspended,
 }
 
-pub struct ByteIterator<T> {
-    it: T,
-    look_ahead: Option<(f64, Signal)>,
+pub struct ByteIterator<T: Iterator> {
+    it: PeekNth<T>,
 
     bit_len: f64,
 
@@ -32,7 +32,7 @@ pub struct ByteIterator<T> {
     ev_queue: VecDeque<(f64, anyhow::Result<Byte>)>,
 }
 
-impl<T> ByteIterator<T> {
+impl<T: Iterator> ByteIterator<T> {
     fn push_bits(&mut self, ulen: u64) {
         let consecutive_ones = ulen - 1;
         let bits = if self.consecutive_ones == 6 {
@@ -71,41 +71,40 @@ where
         while self.ev_queue.is_empty() {
             // cover for cases were DP & DP are slightly de-synchronized and generate spurious SE0
             // & SE1.
-            let mut spurious_signal_duration = 0.;
-            let mut current = match self.look_ahead.take() {
-                Some(current) => current,
-                None => opt_bail!(self.it.next()),
-            };
+            let (t0, sig0) = opt_bail!(self.it.next());
+            let bit_len = self.bit_len;
 
-            let mut next = opt_bail!(self.it.next());
+            //  TODO: coerse following signals that are either:
+            // same signal,
+            // SE0 or SE1 of less than half a bit duration.
 
-            if (current.1 == Signal::SE0 || current.1 == Signal::SE1)
-                && (next.0 - current.0) <= (self.bit_len / 2.)
-            {
-                spurious_signal_duration = next.0 - current.0;
-                current = next;
-                next = opt_bail!(self.it.next());
+            let next_ts = loop {
+                let (t1, duration, sig1) = match self.it.peek() {
+                    Some(&(t1, Ok(sig1))) => match self.it.peek_nth(1) {
+                        Some((t2, _)) => (t1, t2 - t1, sig1),
+                        _ => break None,
+                    },
+                    _ => break None,
+                };
+
+                if !(sig0 == sig1
+                    || ((sig1 == Signal::SE0 || sig1 == Signal::SE1) && duration < (bit_len / 2.)))
+                {
+                    break Some(t1);
+                }
+                self.it.next();
             }
-            self.look_ahead = Some(next);
+            .unwrap_or(f64::INFINITY);
 
-            /*println!(
-                "{:9.9} {:.0}—{}: {:?} ",
-                current.0,
-                (next.0 - current.0) * 1_000_000_000.,
-                ulen,
-                current.1,
-            );*/
+            let ulen = ((next_ts - t0) / self.bit_len).round() as u64;
+            let len = next_ts - t0;
+            let nts = next_ts;
 
-            let (ts, sig) = current;
-            let ulen = ((next.0 - ts + spurious_signal_duration) / self.bit_len).round() as u64;
-            let len = next.0 - ts;
-            let nts = next.0;
-
-            if sig == Signal::SE1 {
+            if sig0 == Signal::SE1 {
                 self.ev_queue
-                    .push_back((ts, Err(anyhow::anyhow!("Unexpected bus state"))));
-            } else if sig == Signal::SE0 && len > 0.010 {
-                self.ev_queue.push_back((ts, Ok(Byte::Reset)));
+                    .push_back((t0, Err(anyhow::anyhow!("Unexpected bus state"))));
+            } else if sig0 == Signal::SE0 && len > 0.010 {
+                self.ev_queue.push_back((t0, Ok(Byte::Reset)));
                 self.state = State::Reset;
                 self.counter = 0;
             } else {
@@ -113,14 +112,14 @@ where
                 match self.state {
                     State::Reset => {
                         // we only expect a J
-                        self.ev_queue.push_back(if sig == Signal::J {
-                            (ts, Ok(Byte::Idle))
+                        self.ev_queue.push_back(if sig0 == Signal::J {
+                            (t0, Ok(Byte::Idle))
                         } else {
-                            (ts, Err(anyhow::anyhow!("Unexpected bus state after Reset")))
+                            (t0, Err(anyhow::anyhow!("Unexpected bus state after Reset")))
                         });
                         self.state = State::Idle;
                     }
-                    State::Idle => match sig {
+                    State::Idle => match sig0 {
                         Signal::K => {
                             if ulen >= 7 {
                                 self.state = State::Suspended;
@@ -134,31 +133,31 @@ where
                         Signal::SE1 => unreachable!(),
                     },
                     State::Receiving => {
-                        if sig == Signal::SE0 && ulen == 2 {
+                        if sig0 == Signal::SE0 && ulen == 2 {
                             assert_eq!(self.counter, 0);
                             self.state = State::EopStart;
-                        } else if ulen <= 7 && (sig == Signal::K || sig == Signal::J) {
+                        } else if ulen <= 7 && (sig0 == Signal::K || sig0 == Signal::J) {
                             self.push_bits(ulen);
                         } else {
                             // framing error
                             self.state = State::Idle;
                             self.ev_queue
-                                .push_back((ts, Err(anyhow::anyhow!("Framing Error"))));
+                                .push_back((t0, Err(anyhow::anyhow!("Framing Error"))));
                         }
                     }
                     State::EopStart => {
                         // we only expect J with J.len >= 1bit
-                        if sig == Signal::J && ulen >= 1 {
+                        if sig0 == Signal::J && ulen >= 1 {
                             self.ev_queue
-                                .push_back((ts - 2. * self.bit_len, Ok(Byte::Eop)));
+                                .push_back((t0 - 2. * self.bit_len, Ok(Byte::Eop)));
                             self.state = State::Idle;
                             if ulen > 1 {
-                                self.ev_queue.push_back((ts + self.bit_len, Ok(Byte::Idle)));
+                                self.ev_queue.push_back((t0 + self.bit_len, Ok(Byte::Idle)));
                             }
                         } else {
                             self.state = State::Idle;
                             self.ev_queue.push_back((
-                                ts,
+                                t0,
                                 Err(anyhow::anyhow!(
                                     "Unexpected bus state after start of End of Packet"
                                 )),
@@ -167,12 +166,12 @@ where
                     }
                     State::Suspended => {
                         // we only expect SE0 with SE0.len == 2
-                        if sig == Signal::SE0 && ulen == 2 {
+                        if sig0 == Signal::SE0 && ulen == 2 {
                             self.state = State::EopStart;
                         } else {
                             self.state = State::Idle;
                             self.ev_queue.push_back((
-                                ts,
+                                t0,
                                 Err(anyhow::anyhow!(
                                     "Unexpected bus state after suspended state."
                                 )),
@@ -195,11 +194,10 @@ where
     }
 }
 
-impl<T> ByteIterator<T> {
+impl<T: Iterator> ByteIterator<T> {
     pub fn new<'a>(input: T, matches: &ArgMatches<'a>) -> Self {
         Self {
-            it: input,
-            look_ahead: None,
+            it: peek_nth(input),
             bit_len: 1.
                 / if matches.is_present("fs") {
                     12_000_000.
@@ -214,7 +212,7 @@ impl<T> ByteIterator<T> {
         }
     }
 }
-pub trait ByteIteratorExt: Sized {
+pub trait ByteIteratorExt: Sized + Iterator {
     fn into_byte(self, matches: &ArgMatches) -> ByteIterator<Self> {
         ByteIterator::new(self, matches)
     }
