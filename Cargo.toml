@@ -13,8 +13,10 @@ maintenance = { status = "experimental" }
 [dependencies]
 nom = "5"
 clap = "2"
+structopt= "0.3"
 vcd = "0.4.0"
 anyhow = "1"
 indicatif = "*"
 console = "*"
 itertools = "*"
+colored = "*"

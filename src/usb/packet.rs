@@ -1,9 +1,10 @@
-use clap::{App, Arg, ArgMatches, SubCommand};
-
 use std::convert::TryFrom;
 
-use super::byte::Byte;
+use anyhow::Result;
+
+use super::byte::{self, Byte};
 use super::types::{crc16, crc5, Data, DataPID, HandShake, Token, TokenType};
+use crate::pipeline::{self, Event, EventData, EventIterator};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
@@ -16,7 +17,7 @@ pub enum Packet {
 
 impl TryFrom<&[u8]> for Packet {
     type Error = anyhow::Error;
-    fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+    fn try_from(buf: &[u8]) -> Result<Self> {
         anyhow::ensure!(buf[0] == 0x80, "Invalid sync byte");
 
         match &buf[1..] {
@@ -88,20 +89,28 @@ pub struct PacketIterator<T> {
 
 impl<T> Iterator for PacketIterator<T>
 where
-    T: Iterator<Item = (f64, anyhow::Result<Byte>)>,
+    T: Iterator<Item = Event>,
 {
-    type Item = (f64, anyhow::Result<Packet>);
+    type Item = Event;
     fn next(&mut self) -> Option<Self::Item> {
         let mut buf = Vec::new();
-        let out = loop {
-            match self.it.next()? {
-                (ts, Ok(byte)) => match byte {
-                    Byte::Reset => break (ts, Ok(Packet::Reset)),
-                    Byte::Idle => {}
-                    Byte::Byte(b) => buf.push(b),
-                    Byte::Eop => break (ts, Packet::try_from(&buf as &[u8])),
-                },
-                (ts, Err(e)) => break (ts, Err(e)),
+
+        let out: (_, Result<Box<dyn EventData>>) = loop {
+            let (ts, event) = match self.it.next()? {
+                (ts, Ok(ev)) => (ts, ev),
+                (ts, Err(e)) => return Some((ts, Err(e))),
+            };
+            let byte = *pipeline::downcast(event);
+            match byte {
+                Byte::Reset => break (ts, Ok(Box::new(Packet::Reset))),
+                Byte::Idle => {}
+                Byte::Byte(b) => buf.push(b),
+                Byte::Eop => {
+                    break (
+                        ts,
+                        Packet::try_from(&buf as &[u8]).map(|v| Box::new(v) as Box<dyn EventData>),
+                    );
+                }
             }
         };
         Some(out)
@@ -109,20 +118,46 @@ where
 }
 
 impl<T> PacketIterator<T> {
-    pub fn new<'a>(input: T, _matches: &ArgMatches<'a>) -> Self {
+    pub fn new<'a>(input: T) -> Self {
         Self { it: input }
     }
 }
-pub trait PacketIteratorExt: Sized {
-    fn into_packet(self, matches: &ArgMatches) -> PacketIterator<Self> {
-        PacketIterator::new(self, matches)
+impl<T: 'static + Iterator<Item = Event>> EventIterator for PacketIterator<T> {
+    fn into_iterator(self: Box<Self>) -> Box<dyn Iterator<Item = Event>> {
+        self
+    }
+    fn event_type(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Packet>()
+    }
+    fn event_type_name(&self) -> &'static str {
+        std::any::type_name::<Packet>()
     }
 }
-impl<T> PacketIteratorExt for T where T: Iterator<Item = (f64, anyhow::Result<Byte>)> {}
 
-pub fn args() -> [Arg<'static, 'static>; 3] {
-    crate::usb::byte::args()
-}
-pub fn subcommand() -> App<'static, 'static> {
-    SubCommand::with_name("usb::packet").args(&args())
+pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &[String]) {
+    use clap::{Arg, SubCommand};
+
+    let _arg_matches = SubCommand::with_name("usb::packet")
+        .setting(clap::AppSettings::NoBinaryName)
+        .arg(Arg::from_usage(
+            "-v, --verbose verbose 'set to print events to stdout.'",
+        ))
+        .get_matches_from(args);
+
+    if pipeline
+        .last()
+        .map(|node| node.event_type() != std::any::TypeId::of::<Byte>())
+        .unwrap_or(false)
+    {
+        byte::build(pipeline, &[]);
+    }
+
+    match pipeline.pop() {
+        None => panic!("Missing source for usb::protocol's parser"),
+        Some(node) => {
+            let it = node.into_iterator();
+            let node = Box::new(PacketIterator::new(it));
+            pipeline.push(node);
+        }
+    }
 }

@@ -1,9 +1,11 @@
-use super::Sample;
-use anyhow::anyhow;
 use std::collections::BTreeMap;
 use std::io::Read;
 
+use anyhow::{anyhow, Context};
 use vcd::{Command, IdCode, Parser, TimescaleUnit, Value, VarType};
+
+use super::Sample;
+use crate::pipeline::{Event, EventData, EventIterator};
 
 pub struct VcdParser<T>
 where
@@ -39,7 +41,7 @@ impl<T> Iterator for VcdParser<T>
 where
     T: Read,
 {
-    type Item = (f64, anyhow::Result<Sample>);
+    type Item = Event;
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped {
             return None;
@@ -49,15 +51,15 @@ where
             match self.input.next()? {
                 Ok(cmd) => match cmd {
                     Command::Timescale(n, unit) => {
-                        self.factor = (n as f64)
-                            * match unit {
-                                TimescaleUnit::S => 1.,
-                                TimescaleUnit::MS => 0.001,
-                                TimescaleUnit::US => 0.000001,
-                                TimescaleUnit::NS => 0.000000001,
-                                TimescaleUnit::PS => 0.000000000001,
-                                TimescaleUnit::FS => 0.000000000000001,
-                            };
+                        let unit = match unit {
+                            TimescaleUnit::S => 1.,
+                            TimescaleUnit::MS => 0.001,
+                            TimescaleUnit::US => 0.000_001,
+                            TimescaleUnit::NS => 0.000_000_001,
+                            TimescaleUnit::PS => 0.000_000_000_001,
+                            TimescaleUnit::FS => 0.000_000_000_000_001,
+                        };
+                        self.factor = (n as f64) * unit;
                     }
                     Command::Timestamp(ts) => {
                         let new_ts = (ts as f64) * self.factor;
@@ -87,7 +89,10 @@ where
                         let shift = self.vars[&id];
                         self.state &= !(1 << shift);
                         self.state |= v << shift;
-                        break (self.current_ts, Ok(Sample(self.state)));
+                        break (
+                            self.current_ts,
+                            Ok(Box::new(Sample(self.state)) as Box<dyn EventData>),
+                        );
                     }
                     Command::VarDef(ty, _sz, id, name) => {
                         if ty == VarType::Wire {
@@ -111,4 +116,37 @@ where
         };
         Some(out)
     }
+}
+
+impl<T: Read + 'static> EventIterator for VcdParser<T> {
+    fn into_iterator(self: Box<Self>) -> Box<dyn Iterator<Item = Event>> {
+        self
+    }
+    fn event_type(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<super::Sample>()
+    }
+    fn event_type_name(&self) -> &'static str {
+        std::any::type_name::<super::Sample>()
+    }
+}
+
+pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &Vec<String>) {
+    use clap::Arg;
+    let _args = clap::SubCommand::with_name("logic2")
+        .setting(clap::AppSettings::NoBinaryName)
+        .args(&[Arg::with_name("file")
+            .help("Input file. (may be a folder in case of Saleae Logic 2 exports.)")
+            .required(true)])
+        .get_matches_from(args);
+
+    let file = std::fs::File::open(
+        _args
+            .value_of("file")
+            .context("Fetching file argument")
+            .unwrap(),
+    )
+    .context("Openning capture file.")
+    .unwrap();
+    let parser = Box::new(VcdParser::new(file));
+    pipeline.push(parser);
 }

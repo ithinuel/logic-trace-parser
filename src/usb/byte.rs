@@ -1,7 +1,11 @@
-use super::signal::Signal;
-use clap::{App, Arg, ArgMatches, SubCommand};
-use itertools::{peek_nth, PeekNth};
 use std::collections::VecDeque;
+
+use anyhow::{anyhow, Result};
+use colored::Colorize;
+use itertools::{peek_nth, PeekNth};
+
+use super::signal::{self, Signal};
+use crate::pipeline::{self, Event, EventData, EventIterator};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Byte {
@@ -29,7 +33,8 @@ pub struct ByteIterator<T: Iterator> {
     shift_reg: u16,
     consecutive_ones: u8,
 
-    ev_queue: VecDeque<(f64, anyhow::Result<Byte>)>,
+    ev_queue: VecDeque<(f64, Result<Box<dyn EventData>>)>,
+    verbose: bool,
 }
 
 impl<T: Iterator> ByteIterator<T> {
@@ -53,25 +58,21 @@ impl<T: Iterator> ByteIterator<T> {
     }
 }
 
-macro_rules! opt_bail {
-    ($input:expr) => {
-        match $input? {
-            (ts, Ok(smp)) => (ts, smp),
-            (ts, Err(e)) => return Some((ts, Err(e))),
-        }
-    };
-}
-
 impl<T> Iterator for ByteIterator<T>
 where
-    T: Iterator<Item = (f64, anyhow::Result<Signal>)>,
+    T: Iterator<Item = Event>,
 {
-    type Item = (f64, anyhow::Result<Byte>);
+    type Item = Event;
     fn next(&mut self) -> Option<Self::Item> {
         while self.ev_queue.is_empty() {
             // cover for cases were DP & DP are slightly de-synchronized and generate spurious SE0
             // & SE1.
-            let (t0, sig0) = opt_bail!(self.it.next());
+            let (t0, event) = match self.it.next()? {
+                (ts, Ok(ev)) => (ts, ev),
+                (ts, Err(e)) => return Some((ts, Err(e))),
+            };
+            let sig0 = *pipeline::downcast(event);
+
             let bit_len = self.bit_len;
 
             //  TODO: coerse following signals that are either:
@@ -80,10 +81,14 @@ where
 
             let next_ts = loop {
                 let (t1, duration, sig1) = match self.it.peek() {
-                    Some(&(t1, Ok(sig1))) => match self.it.peek_nth(1) {
-                        Some((t2, _)) => (t1, t2 - t1, sig1),
-                        _ => break None,
-                    },
+                    Some((t1, Ok(sig1))) => {
+                        let t1 = *t1;
+                        let sig1 = *pipeline::downcast_ref::<Signal>(sig1);
+                        match self.it.peek_nth(1) {
+                            Some((t2, _)) => (t1, t2 - t1, sig1),
+                            _ => break None,
+                        }
+                    }
                     _ => break None,
                 };
 
@@ -102,9 +107,9 @@ where
 
             if sig0 == Signal::SE1 {
                 self.ev_queue
-                    .push_back((t0, Err(anyhow::anyhow!("Unexpected bus state"))));
+                    .push_back((t0, Err(anyhow!("Unexpected bus state"))));
             } else if sig0 == Signal::SE0 && len > 0.010 {
-                self.ev_queue.push_back((t0, Ok(Byte::Reset)));
+                self.ev_queue.push_back((t0, Ok(Box::new(Byte::Reset))));
                 self.state = State::Reset;
                 self.counter = 0;
             } else {
@@ -113,9 +118,9 @@ where
                     State::Reset => {
                         // we only expect a J
                         self.ev_queue.push_back(if sig0 == Signal::J {
-                            (t0, Ok(Byte::Idle))
+                            (t0, Ok(Box::new(Byte::Idle)))
                         } else {
-                            (t0, Err(anyhow::anyhow!("Unexpected bus state after Reset")))
+                            (t0, Err(anyhow!("Unexpected bus state after Reset")))
                         });
                         self.state = State::Idle;
                     }
@@ -141,26 +146,24 @@ where
                         } else {
                             // framing error
                             self.state = State::Idle;
-                            self.ev_queue
-                                .push_back((t0, Err(anyhow::anyhow!("Framing Error"))));
+                            self.ev_queue.push_back((t0, Err(anyhow!("Framing Error"))));
                         }
                     }
                     State::EopStart => {
                         // we only expect J with J.len >= 1bit
                         if sig0 == Signal::J && ulen >= 1 {
                             self.ev_queue
-                                .push_back((t0 - 2. * self.bit_len, Ok(Byte::Eop)));
+                                .push_back((t0 - 2. * self.bit_len, Ok(Box::new(Byte::Eop))));
                             self.state = State::Idle;
                             if ulen > 1 {
-                                self.ev_queue.push_back((t0 + self.bit_len, Ok(Byte::Idle)));
+                                self.ev_queue
+                                    .push_back((t0 + self.bit_len, Ok(Box::new(Byte::Idle))));
                             }
                         } else {
                             self.state = State::Idle;
                             self.ev_queue.push_back((
                                 t0,
-                                Err(anyhow::anyhow!(
-                                    "Unexpected bus state after start of End of Packet"
-                                )),
+                                Err(anyhow!("Unexpected bus state after start of End of Packet")),
                             ));
                         }
                     }
@@ -172,9 +175,7 @@ where
                             self.state = State::Idle;
                             self.ev_queue.push_back((
                                 t0,
-                                Err(anyhow::anyhow!(
-                                    "Unexpected bus state after suspended state."
-                                )),
+                                Err(anyhow!("Unexpected bus state after suspended state.")),
                             ));
                         }
                     }
@@ -183,19 +184,24 @@ where
             if self.counter >= 8 {
                 self.ev_queue.push_back((
                     nts,
-                    Ok(Byte::Byte(
+                    Ok(Box::new(Byte::Byte(
                         ((self.shift_reg >> (16 - self.counter)) & 0xFF) as u8,
-                    )),
+                    ))),
                 ));
                 self.counter -= 8;
             }
         }
-        self.ev_queue.pop_front()
+        self.ev_queue.pop_front().map(|ev| {
+            if self.verbose {
+                println!("{:10.9}: {}: {:?}", ev.0, "Byte".green().bold(), ev.1);
+            }
+            ev
+        })
     }
 }
 
 impl<T: Iterator> ByteIterator<T> {
-    pub fn new<'a>(input: T, matches: &ArgMatches<'a>) -> Self {
+    pub fn new<'a>(input: T, matches: &clap::ArgMatches<'a>) -> Self {
         Self {
             it: peek_nth(input),
             bit_len: 1.
@@ -209,19 +215,47 @@ impl<T: Iterator> ByteIterator<T> {
             shift_reg: 0,
             consecutive_ones: 0,
             ev_queue: VecDeque::new(),
+            verbose: matches.is_present("-v"),
         }
     }
 }
-pub trait ByteIteratorExt: Sized + Iterator {
-    fn into_byte(self, matches: &ArgMatches) -> ByteIterator<Self> {
-        ByteIterator::new(self, matches)
+
+impl<T: 'static + Iterator<Item = Event>> EventIterator for ByteIterator<T> {
+    fn into_iterator(self: Box<Self>) -> Box<dyn Iterator<Item = Event>> {
+        self
+    }
+    fn event_type(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Byte>()
+    }
+    fn event_type_name(&self) -> &'static str {
+        std::any::type_name::<Byte>()
     }
 }
-impl<T> ByteIteratorExt for T where T: Iterator<Item = (f64, anyhow::Result<Signal>)> {}
 
-pub fn args() -> [Arg<'static, 'static>; 3] {
-    crate::usb::signal::args()
-}
-pub fn subcommand() -> App<'static, 'static> {
-    SubCommand::with_name("usb::byte").args(&args())
+pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &[String]) {
+    use clap::{Arg, SubCommand};
+    let arg_matches = SubCommand::with_name("usb::byte")
+        .setting(clap::AppSettings::NoBinaryName)
+        .args(&[
+            Arg::from_usage("-v, --verbose verbose 'set to print events to stdout.'"),
+            Arg::from_usage("--fs 'the Usb interface is full speed'"),
+        ])
+        .get_matches_from(args);
+
+    if pipeline
+        .last()
+        .map(|node| node.event_type() != std::any::TypeId::of::<Signal>())
+        .unwrap_or(false)
+    {
+        signal::build(pipeline, &[]);
+    }
+
+    match pipeline.pop() {
+        None => panic!("Missing source for usb::device's parser"),
+        Some(node) => {
+            let it = node.into_iterator();
+            let node = Box::new(ByteIterator::new(it, &arg_matches));
+            pipeline.push(node);
+        }
+    }
 }

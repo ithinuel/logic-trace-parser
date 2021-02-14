@@ -1,4 +1,4 @@
-use crate::input::Sample;
+use crate::source::Sample;
 use clap::{value_t, App, Arg, ArgMatches, SubCommand};
 use std::fmt;
 use std::str::FromStr;

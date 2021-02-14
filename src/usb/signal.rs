@@ -1,5 +1,7 @@
-use crate::input::Sample;
-use clap::{value_t, App, Arg, ArgMatches, SubCommand};
+use clap::{value_t, ArgMatches};
+
+use crate::pipeline::{self, Event, EventIterator};
+use crate::source::Sample;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Signal {
@@ -16,20 +18,22 @@ pub struct SignalIterator<T> {
     dm_mask: u64,
 
     current_signal: Option<Signal>,
+    verbose: bool,
 }
 
 impl<T> Iterator for SignalIterator<T>
 where
-    T: Iterator<Item = (f64, anyhow::Result<Sample>)>,
+    T: Iterator<Item = Event>,
 {
-    type Item = (f64, anyhow::Result<Signal>);
+    type Item = Event;
     fn next(&mut self) -> Option<Self::Item> {
-        let out = loop {
-            let (ts, smp) = self.it.next()?;
-            let smp = match smp {
-                Ok(Sample(smp)) => smp,
-                Err(e) => break (ts, Err(e)),
+        let res: Event = loop {
+            let (ts, event) = match self.it.next()? {
+                (ts, Ok(ev)) => (ts, ev),
+                (ts, Err(e)) => break (ts, Err(e)),
             };
+
+            let smp = pipeline::downcast::<Sample>(event).0;
 
             let dp = (smp & self.dp_mask) == self.dp_mask;
             let dm = (smp & self.dm_mask) == self.dm_mask;
@@ -46,10 +50,14 @@ where
                 .unwrap_or(true)
             {
                 self.current_signal = Some(s);
-                break (ts, Ok(s));
+                if self.verbose {}
+                break (ts, Ok(Box::new(s)));
             }
         };
-        Some(out)
+        if self.verbose {
+            println!("{:.9}: {:?}", res.0, res.1);
+        }
+        Some(res)
     }
 }
 impl<T> SignalIterator<T> {
@@ -60,24 +68,49 @@ impl<T> SignalIterator<T> {
             dp_mask: 1 << value_t!(matches, "dp", u8).unwrap_or_else(|e| e.exit()),
             dm_mask: 1 << value_t!(matches, "dm", u8).unwrap_or_else(|e| e.exit()),
             current_signal: None,
+            verbose: matches.is_present("verbose"),
         }
     }
 }
-pub trait SignalIteratorExt: Sized {
-    fn into_signal(self, matches: &ArgMatches) -> SignalIterator<Self> {
-        SignalIterator::new(self, matches)
+impl<T: 'static + Iterator<Item = Event>> EventIterator for SignalIterator<T> {
+    fn into_iterator(self: Box<Self>) -> Box<dyn Iterator<Item = Event>> {
+        self
+    }
+    fn event_type(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Signal>()
+    }
+    fn event_type_name(&self) -> &'static str {
+        std::any::type_name::<Signal>()
     }
 }
-impl<T> SignalIteratorExt for T where T: Iterator<Item = (f64, anyhow::Result<Sample>)> {}
 
-pub fn args() -> [Arg<'static, 'static>; 3] {
-    [
-        Arg::from_usage("--dp [dp] 'Channel used for the d+ pin'").default_value("0"),
-        Arg::from_usage("--dm [dm] 'Channel used for the d- pin'").default_value("1"),
-        Arg::from_usage("--fs 'Indicates that the device is full-speed USB'"),
-    ]
-}
+pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &[String]) {
+    use clap::{Arg, SubCommand};
+    let arg_matches = SubCommand::with_name("usb::signal")
+        .setting(clap::AppSettings::NoBinaryName)
+        .args(&[
+            Arg::from_usage("-v, --verbose verbose 'set to print events to stdout.'"),
+            Arg::from_usage("--dp [dp] 'Channel used for the d+ pin'").default_value("0"),
+            Arg::from_usage("--dm [dm] 'Channel used for the d- pin'").default_value("1"),
+            Arg::from_usage("--fs 'Indicates that the device is full-speed USB'"),
+        ])
+        .get_matches_from(args);
 
-pub fn subcommand() -> App<'static, 'static> {
-    SubCommand::with_name("usb::signal").args(&args())
+    if let Some(node) = pipeline.last() {
+        if node.event_type() != std::any::TypeId::of::<Sample>() {
+            panic!(
+                "Invalid input type. Exected Samples but got {}",
+                node.event_type_name()
+            )
+        }
+    }
+
+    match pipeline.pop() {
+        None => panic!("Missing source for usb::signal's parser"),
+        Some(node) => {
+            let it = node.into_iterator();
+            let node = Box::new(SignalIterator::new(it, &arg_matches));
+            pipeline.push(node);
+        }
+    }
 }

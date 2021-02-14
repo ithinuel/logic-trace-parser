@@ -1,6 +1,7 @@
-use super::packet::Packet;
+use super::packet::{self, Packet};
 use super::types::{Data, HandShake, Token};
-use clap::{App, Arg, ArgMatches, SubCommand};
+use crate::pipeline::{self, Event as PipeEvent, EventData, EventIterator};
+use anyhow::Result;
 
 #[derive(Debug)]
 pub enum Event {
@@ -29,24 +30,29 @@ pub struct ProtocolIterator<T> {
 }
 impl<T> Iterator for ProtocolIterator<T>
 where
-    T: Iterator<Item = (f64, anyhow::Result<Packet>)>,
+    T: Iterator<Item = PipeEvent>,
 {
-    type Item = (f64, anyhow::Result<Event>);
+    type Item = PipeEvent;
     fn next(&mut self) -> Option<Self::Item> {
-        let out = loop {
-            match self.it.next()? {
-                (ts, Ok(Packet::Reset)) => {
+        let out: (_, Result<Box<dyn EventData>>) = loop {
+            let (ts, event) = match self.it.next()? {
+                (ts, Ok(ev)) => (ts, ev),
+                (ts, Err(e)) => return Some((ts, Err(e))),
+            };
+            let event = *pipeline::downcast(event);
+            match event {
+                Packet::Reset => {
                     self.transaction_state = TransactionState::Idle;
-                    break (ts, Ok(Event::Reset));
+                    break (ts, Ok(Box::new(Event::Reset)));
                 }
-                (ts, Ok(Packet::SoF(frm_num))) => break (ts, Ok(Event::Sof(frm_num))),
-                (ts, Ok(Packet::Token(token))) => match self.transaction_state {
+                Packet::SoF(frm_num) => break (ts, Ok(Box::new(Event::Sof(frm_num)))),
+                Packet::Token(token) => match self.transaction_state {
                     TransactionState::Idle => {
                         self.transaction_state = TransactionState::Token(token);
                     }
                     _ => break (ts, Err(anyhow::anyhow!("Unexpected token packet"))),
                 },
-                (ts, Ok(Packet::Data(data))) => match self.transaction_state {
+                Packet::Data(data) => match self.transaction_state {
                     TransactionState::Token(token) => {
                         self.transaction_state = TransactionState::Data {
                             token,
@@ -55,7 +61,7 @@ where
                     }
                     _ => break (ts, Err(anyhow::anyhow!("Unexpected data packet"))),
                 },
-                (ts, Ok(Packet::HandShake(handshake))) => {
+                Packet::HandShake(handshake) => {
                     let (token, data) = match self.transaction_state {
                         TransactionState::Token(token) => (token, None),
                         TransactionState::Data {
@@ -67,15 +73,13 @@ where
                     self.transaction_state = TransactionState::Idle;
                     break (
                         ts,
-                        Ok(Event::Transaction(Transaction {
+                        Ok(Box::new(Event::Transaction(Transaction {
                             token,
                             data,
                             handshake,
-                        })),
+                        }))),
                     );
                 }
-
-                (ts, Err(e)) => break (ts, Err(e)),
             }
         };
 
@@ -85,9 +89,9 @@ where
 
 impl<T> ProtocolIterator<T>
 where
-    T: Iterator<Item = (f64, anyhow::Result<Packet>)>,
+    T: Iterator<Item = PipeEvent>,
 {
-    pub fn new<'a>(input: T, _matches: &ArgMatches<'a>) -> Self {
+    pub fn new<'a>(input: T) -> Self {
         Self {
             it: input,
 
@@ -95,16 +99,43 @@ where
         }
     }
 }
-pub trait ProtocolIteratorExt: Iterator<Item = (f64, anyhow::Result<Packet>)> + Sized {
-    fn into_protocol(self, matches: &ArgMatches) -> ProtocolIterator<Self> {
-        ProtocolIterator::new(self, matches)
+
+impl<T: 'static + Iterator<Item = PipeEvent>> EventIterator for ProtocolIterator<T> {
+    fn into_iterator(self: Box<Self>) -> Box<dyn Iterator<Item = PipeEvent>> {
+        self
+    }
+    fn event_type(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Event>()
+    }
+    fn event_type_name(&self) -> &'static str {
+        std::any::type_name::<Event>()
     }
 }
-impl<T> ProtocolIteratorExt for T where T: Iterator<Item = (f64, anyhow::Result<Packet>)> {}
 
-pub fn args() -> [Arg<'static, 'static>; 3] {
-    crate::usb::packet::args()
-}
-pub fn subcommand() -> App<'static, 'static> {
-    SubCommand::with_name("usb::protocol").args(&args())
+pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &[String]) {
+    use clap::{Arg, SubCommand};
+
+    let _arg_matches = SubCommand::with_name("usb::protocol")
+        .setting(clap::AppSettings::NoBinaryName)
+        .arg(Arg::from_usage(
+            "-v, --verbose verbose 'set to print events to stdout.'",
+        ))
+        .get_matches_from(args);
+
+    if pipeline
+        .last()
+        .map(|node| node.event_type() != std::any::TypeId::of::<Packet>())
+        .unwrap_or(false)
+    {
+        packet::build(pipeline, &[]);
+    }
+
+    match pipeline.pop() {
+        None => panic!("Missing source for usb::protocol's parser"),
+        Some(node) => {
+            let it = node.into_iterator();
+            let node = Box::new(ProtocolIterator::new(it));
+            pipeline.push(node);
+        }
+    }
 }

@@ -1,146 +1,67 @@
-use anyhow::Context;
-use clap::{crate_authors, crate_description, crate_name, crate_version, App, AppSettings, Arg};
+use itertools::Itertools;
 
-mod input;
-mod serial;
-mod spi;
-mod spif;
+//mod serial;
+//mod spi;
+//mod spif;
 mod usb;
-mod wizfi310;
+//mod wizfi310;
 
-use input::sample_iterator;
-use serial::SerialIteratorExt as _;
-use spi::SpiIteratorExt as _;
-use spif::SpifIteratorExt as _;
-use usb::byte::ByteIteratorExt as _;
-use usb::device::DeviceEventIteratorExt as _;
-use usb::packet::PacketIteratorExt as _;
-use usb::protocol::ProtocolIteratorExt as _;
-use usb::signal::SignalIteratorExt as _;
-use wizfi310::Wizfi310IteratorExt as _;
+mod pipeline;
+mod sink;
+mod source;
 
-fn inspect_with_depth<T: core::fmt::Debug>(
-    matches: &clap::ArgMatches,
-    source: &'static str,
-    depth: u64,
-) -> impl Fn(&(f64, T)) {
-    let verbosity = matches.occurrences_of("v");
-    move |(ts, v)| {
-        if verbosity >= depth {
-            println!("{:.9}:{}: {:x?}", ts, source, v);
-        }
-    }
-}
-fn print<T: core::fmt::Debug>((ts, v): (f64, T)) {
-    println!("{:.9}: {:x?}", ts, v)
-}
+const TOP_LEVEL_SUBCOMMANDS: [&'static str; 12] = [
+    "vcd",
+    "logic",
+    "logic2",
+    "spi",
+    "spif",
+    "serial",
+    "wizfi310",
+    "usb::signal",
+    "usb::byte",
+    "usb::packet",
+    "usb::protocol",
+    "usb::device",
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let matches = App::new(crate_name!())
-        .setting(AppSettings::UnifiedHelpMessage)
-        .version(crate_version!())
-        .author(crate_authors!())
-        .about(crate_description!())
-        .setting(AppSettings::SubcommandRequiredElseHelp)
-        .arg(Arg::from_usage("--vcd 'Input is a vcd file'").global(true))
-        .arg(Arg::from_usage("--logic2 'Input is a Saleae Logic 2 capture file'").global(true))
-        .subcommand(spi::subcommand())
-        .subcommand(spif::subcommand())
-        .subcommand(serial::subcommand())
-        .subcommand(wizfi310::subcommand())
-        .subcommand(usb::signal::subcommand())
-        .subcommand(usb::byte::subcommand())
-        .subcommand(usb::packet::subcommand())
-        .subcommand(usb::protocol::subcommand())
-        .subcommand(usb::device::subcommand())
-        .args(&[
-            Arg::from_usage("-f, --freq [freq] 'Sample frequency (only used on binary input)'")
-                .default_value("1.")
-                .global(true),
-            Arg::with_name("v")
-                .short("v")
-                .multiple(true)
-                .help("Sets the level of verbosity")
-                .global(true),
-            Arg::with_name("file")
-                .help("Input file. (may be a folder in case of Saleae Logic 2 exports.)")
-                .required(true),
-        ])
-        .get_matches();
+    let mut pipeline = Vec::new();
 
-    let path = matches
-        .value_of("file")
-        .with_context(|| "clap guaranties this is available.")?;
+    for (sub_command, args) in std::env::args().skip(1).peekable().batching(|it| {
+        it.next().map(|subcmd| {
+            let mut args = it
+                .peeking_take_while(|s| !TOP_LEVEL_SUBCOMMANDS.contains(&s.as_str()))
+                .collect::<Vec<_>>();
 
-    use console::TermFamily;
-    if let TermFamily::UnixTerm | TermFamily::WindowsConsole =
-        console::Term::stderr().features().family()
-    {
-        eprint!("\x1B]0;Parsing: {:?}\x07", path);
+            if it.len() == 0 {
+                args.push("-v".into());
+            }
+            (subcmd, args)
+        })
+    }) {
+        match sub_command.as_str() {
+            "vcd" => source::vcd::build(&mut pipeline, &args),
+            "logic" => source::logic::build(&mut pipeline, &args),
+            "logic2" => source::logic2::build(&mut pipeline, &args),
+            "usb::signal" => usb::signal::build(&mut pipeline, &args),
+            "usb::byte" => usb::byte::build(&mut pipeline, &args),
+            "usb::packet" => usb::packet::build(&mut pipeline, &args),
+            "usb::protocol" => usb::protocol::build(&mut pipeline, &args),
+            "usb::device" => usb::device::build(&mut pipeline, &args),
+            _ => unimplemented!(),
+        }
     }
 
-    match matches.subcommand() {
-        ("spif", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 2))
-            .into_spi(matches)
-            .inspect(inspect_with_depth(matches, "spi", 1))
-            .into_spif(matches)
-            .for_each(|_| todo!()),
-        ("spi", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 1))
-            .into_spi(matches)
-            .for_each(print),
-        ("serial", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 1))
-            .into_serial(matches)
-            .for_each(print),
-        ("wizfi310", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 2))
-            .into_serial(matches)
-            .inspect(inspect_with_depth(matches, "serial", 1))
-            .into_wizfi310(matches)
-            .for_each(print),
-        ("usb::signal", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 1))
-            .into_signal(matches)
-            .for_each(print),
-        ("usb::byte", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 2))
-            .into_signal(matches)
-            .inspect(inspect_with_depth(matches, "serial", 1))
-            .into_byte(matches)
-            .for_each(print),
-        ("usb::packet", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 3))
-            .into_signal(matches)
-            .inspect(inspect_with_depth(matches, "signal", 2))
-            .into_byte(matches)
-            .inspect(inspect_with_depth(matches, "byte", 1))
-            .into_packet(matches)
-            .for_each(print),
-        ("usb::protocol", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 4))
-            .into_signal(matches)
-            .inspect(inspect_with_depth(matches, "signal", 3))
-            .into_byte(matches)
-            .inspect(inspect_with_depth(matches, "byte", 2))
-            .into_packet(matches)
-            .inspect(inspect_with_depth(matches, "packet", 1))
-            .into_protocol(matches)
-            .for_each(print),
-        ("usb::device", Some(matches)) => sample_iterator(path, matches)?
-            .inspect(inspect_with_depth(matches, "sample", 5))
-            .into_signal(matches)
-            .inspect(inspect_with_depth(matches, "signal", 4))
-            .into_byte(matches)
-            .inspect(inspect_with_depth(matches, "byte", 3))
-            .into_packet(matches)
-            .inspect(inspect_with_depth(matches, "packet", 2))
-            .into_protocol(matches)
-            .inspect(inspect_with_depth(matches, "protocol", 1))
-            .into_device(matches)
-            .for_each(print),
-        _ => unreachable!(),
-    };
+    assert_eq!(
+        pipeline.len(),
+        1,
+        "The pipeline should resolve to a single iterator"
+    );
+    colored::control::set_override(true);
+    if let Some(event_iterator) = pipeline.pop() {
+        event_iterator.for_each(|_| {});
+    }
+
     Ok(())
 }
