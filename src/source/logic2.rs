@@ -13,7 +13,6 @@ use crate::pipeline::{Event, EventIterator};
 struct Channel {
     id: u32,
     initial_state: bool,
-
     transitions: Vec<f64>,
 }
 

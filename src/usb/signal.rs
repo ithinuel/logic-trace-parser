@@ -99,7 +99,8 @@ pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &[String]) {
     if let Some(node) = pipeline.last() {
         if node.event_type() != std::any::TypeId::of::<Sample>() {
             panic!(
-                "Invalid input type. Exected Samples but got {}",
+                "Invalid input type. Exected {} but got {}",
+                std::any::type_name::<Sample>(),
                 node.event_type_name()
             )
         }
