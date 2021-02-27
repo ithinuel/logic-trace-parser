@@ -34,7 +34,7 @@ SUBCOMMANDS:
 
 Things I'd like to implement at some point in the future:
 
-- [ ] Source-sink pipelining
+- [ ] Source-sink pipelining (see https://github.com/ithinuel/logic-trace-parser/pull/1)
 - [ ] usb::device::msd
 - [ ] usb::device::cdc
 - [ ] automatic usb speed detection
