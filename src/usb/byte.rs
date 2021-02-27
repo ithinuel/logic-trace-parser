@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{borrow::Borrow, collections::VecDeque};
 
 use anyhow::{anyhow, Result};
 use colored::Colorize;
@@ -83,7 +83,7 @@ where
                 let (t1, duration, sig1) = match self.it.peek() {
                     Some((t1, Ok(sig1))) => {
                         let t1 = *t1;
-                        let sig1 = *pipeline::downcast_ref::<Signal>(sig1);
+                        let sig1 = *pipeline::downcast_ref::<Signal>(sig1.borrow());
                         match self.it.peek_nth(1) {
                             Some((t2, _)) => (t1, t2 - t1, sig1),
                             _ => break None,
@@ -201,7 +201,7 @@ where
 }
 
 impl<T: Iterator> ByteIterator<T> {
-    pub fn new<'a>(input: T, matches: &clap::ArgMatches<'a>) -> Self {
+    pub fn new(input: T, matches: &clap::ArgMatches<'_>) -> Self {
         Self {
             it: peek_nth(input),
             bit_len: 1.

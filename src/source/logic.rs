@@ -78,7 +78,7 @@ impl<T: Read + 'static> EventIterator for LogicDataParser<T> {
     }
 }
 
-pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &Vec<String>) {
+pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &[String]) {
     use clap::Arg;
     let args = clap::SubCommand::with_name("logic2")
         .setting(clap::AppSettings::NoBinaryName)

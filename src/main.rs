@@ -1,3 +1,4 @@
+#![allow(clippy::upper_case_acronyms)]
 use itertools::Itertools;
 
 //mod serial;
@@ -10,7 +11,7 @@ mod pipeline;
 mod sink;
 mod source;
 
-const TOP_LEVEL_SUBCOMMANDS: [&'static str; 12] = [
+const TOP_LEVEL_SUBCOMMANDS: [&str; 12] = [
     "vcd",
     "logic",
     "logic2",
@@ -25,7 +26,7 @@ const TOP_LEVEL_SUBCOMMANDS: [&'static str; 12] = [
     "usb::device",
 ];
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     let mut pipeline = Vec::new();
 
     for (sub_command, args) in std::env::args().skip(1).peekable().batching(|it| {
@@ -62,6 +63,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(event_iterator) = pipeline.pop() {
         event_iterator.for_each(|_| {});
     }
-
-    Ok(())
 }

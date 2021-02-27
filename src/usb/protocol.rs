@@ -67,7 +67,7 @@ where
                         TransactionState::Data {
                             token,
                             ref mut data,
-                        } => (token, std::mem::replace(data, None)),
+                        } => (token, data.take()),
                         _ => break (ts, Err(anyhow::anyhow!("Unexpected handshake packet"))),
                     };
                     self.transaction_state = TransactionState::Idle;
@@ -91,7 +91,7 @@ impl<T> ProtocolIterator<T>
 where
     T: Iterator<Item = PipeEvent>,
 {
-    pub fn new<'a>(input: T) -> Self {
+    pub fn new(input: T) -> Self {
         Self {
             it: input,
 

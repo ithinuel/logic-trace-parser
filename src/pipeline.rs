@@ -1,5 +1,5 @@
+use std::any::Any;
 use std::fmt::Debug;
-use std::{any::Any, borrow::Borrow};
 
 use anyhow::Result;
 use colored::*;
@@ -41,10 +41,9 @@ pub fn downcast<T: 'static>(event: Box<dyn EventData>) -> Box<T> {
         std::process::exit(1);
     })
 }
-pub fn downcast_ref<T: 'static>(event: &Box<dyn EventData>) -> &T {
-    let borrowed: &dyn EventData = event.borrow();
-    let name = borrowed.type_name();
-    borrowed.as_any().downcast_ref().unwrap_or_else(|| {
+pub fn downcast_ref<T: 'static>(event: &dyn EventData) -> &T {
+    let name = event.type_name();
+    event.as_any().downcast_ref().unwrap_or_else(|| {
         eprintln!(
             "{}: Unexpected event type {} while expecting {}",
             "Error".red().bold(),

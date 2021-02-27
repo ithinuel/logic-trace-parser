@@ -10,9 +10,9 @@ use std::convert::TryFrom;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {}
-impl Into<super::DeviceEvent> for Event {
-    fn into(self) -> super::DeviceEvent {
-        super::DeviceEvent::Control(self)
+impl From<Event> for super::DeviceEvent {
+    fn from(from: Event) -> super::DeviceEvent {
+        super::DeviceEvent::Control(from)
     }
 }
 
@@ -52,7 +52,7 @@ impl ControlEndpoint {
         endpoints: &mut HashMap<usize, Box<dyn super::Endpoint>>,
     ) -> Option<anyhow::Result<super::DeviceEvent>> {
         // dirty
-        if endpoints.len() == 0 {
+        if endpoints.is_empty() {
             endpoints.insert(
                 1,
                 Box::new(super::cdc::CdCEndpoint(4)) as Box<dyn super::Endpoint>,
@@ -156,7 +156,7 @@ impl ControlEndpoint {
                         }
                         if is_zlp || buf.len() == buf.capacity() {
                             self.request_state =
-                                RequestState::Status(request.clone(), buffer.take(), false);
+                                RequestState::Status(*request, buffer.take(), false);
                         }
 
                         break;

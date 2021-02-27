@@ -118,7 +118,7 @@ where
 }
 
 impl<T> PacketIterator<T> {
-    pub fn new<'a>(input: T) -> Self {
+    pub fn new(input: T) -> Self {
         Self { it: input }
     }
 }

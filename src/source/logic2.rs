@@ -179,7 +179,7 @@ impl<T: Iterator<Item = (f64, u64)> + 'static> EventIterator for LogicData<T> {
     }
 }
 
-pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &Vec<String>) {
+pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &[String]) {
     let args = clap::SubCommand::with_name("logic2")
         .setting(clap::AppSettings::NoBinaryName)
         .arg(

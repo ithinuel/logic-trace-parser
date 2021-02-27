@@ -10,9 +10,9 @@ pub enum Event {
     Tx(Vec<u8>),
 }
 
-impl Into<super::ClassEvent> for Event {
-    fn into(self) -> super::ClassEvent {
-        super::ClassEvent::CdC(self)
+impl From<Event> for super::ClassEvent {
+    fn from(event: Event) -> super::ClassEvent {
+        super::ClassEvent::CdC(event)
     }
 }
 

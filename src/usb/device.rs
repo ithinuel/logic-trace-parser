@@ -17,9 +17,9 @@ pub enum ClassEvent {
     CdC(cdc::Event),
     MassStorage(msd::Event),
 }
-impl Into<InterfaceEvent> for ClassEvent {
-    fn into(self) -> InterfaceEvent {
-        InterfaceEvent::Class(self)
+impl From<ClassEvent> for InterfaceEvent {
+    fn from(from: ClassEvent) -> InterfaceEvent {
+        InterfaceEvent::Class(from)
     }
 }
 
@@ -27,9 +27,9 @@ impl Into<InterfaceEvent> for ClassEvent {
 pub enum InterfaceEvent {
     Class(ClassEvent),
 }
-impl Into<DeviceEvent> for InterfaceEvent {
-    fn into(self) -> DeviceEvent {
-        DeviceEvent::Interface(self)
+impl From<InterfaceEvent> for DeviceEvent {
+    fn from(from: InterfaceEvent) -> DeviceEvent {
+        DeviceEvent::Interface(from)
     }
 }
 
@@ -75,19 +75,17 @@ where
                 Event::Reset => break (ts, Ok(Box::new(DeviceEvent::Reset))),
                 Event::Transaction(transaction) => {
                     let endpt = usize::from(transaction.token.endpoint);
-                    match if endpt == 0 {
+                    let res = if endpt == 0 {
                         self.control.update(ts, transaction, &mut self.endpoints)
                     } else {
                         self.endpoints
                             .get_mut(&endpt)
                             .map(|endpoint| endpoint.update(ts, transaction))
                             .unwrap_or_else(|| Some(Err(anyhow!("Invalid endpoint {}", endpt))))
-                    } {
-                        Some(res) => {
-                            let res = res.map(|v| Box::new(v) as Box<dyn EventData>);
-                            break (ts, res);
-                        }
-                        None => {}
+                    };
+                    if let Some(res) = res {
+                        let res = res.map(|v| Box::new(v) as Box<dyn EventData>);
+                        break (ts, res);
                     }
                 }
             }
@@ -97,7 +95,7 @@ where
 }
 
 impl<T> DeviceEventIterator<T> {
-    pub fn new<'a>(input: T) -> Self {
+    pub fn new(input: T) -> Self {
         Self {
             it: input,
             control: control::ControlEndpoint::new(),

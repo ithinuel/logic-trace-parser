@@ -63,7 +63,7 @@ where
                     }
                     Command::Timestamp(ts) => {
                         let new_ts = (ts as f64) * self.factor;
-                        if self.first_ts == -0.1 {
+                        if (self.first_ts + 0.1).abs() < f64::EPSILON {
                             self.first_ts = new_ts;
                         }
 
@@ -130,7 +130,7 @@ impl<T: Read + 'static> EventIterator for VcdParser<T> {
     }
 }
 
-pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &Vec<String>) {
+pub fn build(pipeline: &mut Vec<Box<dyn EventIterator>>, args: &[String]) {
     use clap::Arg;
     let _args = clap::SubCommand::with_name("logic2")
         .setting(clap::AppSettings::NoBinaryName)

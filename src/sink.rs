@@ -10,7 +10,6 @@ impl<T: Iterator<Item = (f64, Result<Box<dyn std::fmt::Debug>, Error>)>> Iterato
                 Ok(debug) => println!("{:.9}: {:?}", ts, debug),
                 Err(e) => println!("{:.9}: {:?}", ts, e),
             };
-            () // make it an explicit `unit` return
         })
     }
 }
